@@ -52,4 +52,4 @@ jobs:
         PROXY: socks5://127.0.0.1:8080
       run: |
         # 使用 xvfb 运行以支持强力过人机验证模式
-        xvfb-run -a python aclclouds.py
+        xvfb-run -a python acl/aclclouds.py
