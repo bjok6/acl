@@ -1,0 +1,55 @@
+name: Aclclouds-Renew
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 1 */2 * *'
+
+jobs:
+  run_renewal:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install seleniumbase requests
+        
+    - name: Setup Chrome
+      run: |
+        seleniumbase install chromedriver
+        
+    - name: Setup Proxy Tunnel (sing-box)
+      env:
+        PROXY_STR: ${{ secrets.PROXY }}
+      run: |
+        wget -q https://github.com/SagerNet/sing-box/releases/download/v1.8.10/sing-box-1.8.10-linux-amd64.tar.gz
+        tar -xzf sing-box-1.8.10-linux-amd64.tar.gz
+        chmod +x sing-box-1.8.10-linux-amd64/sing-box
+        python generate_singbox_config.py
+        if ! ./sing-box-1.8.10-linux-amd64/sing-box check -c config.json; then
+          echo "❌ Invalid sing-box config!"
+          exit 1
+        fi
+        nohup ./sing-box-1.8.10-linux-amd64/sing-box run -c config.json > singbox.log 2>&1 &
+        sleep 8
+        curl --connect-timeout 10 -x socks5h://127.0.0.1:8080 https://api.ipify.org || true
+
+    - name: Run Task (CF-Bypass Mode)
+      env:
+        PYTHONIOENCODING: utf-8
+        COOKIE: ${{ secrets.COOKIE }}
+        TG_TOKEN: ${{ secrets.TG_TOKEN }}
+        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        PROXY: socks5://127.0.0.1:8080
+      run: |
+        # 使用 xvfb 运行以支持强力过人机验证模式
+        xvfb-run -a python aclclouds.py
