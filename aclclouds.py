@@ -20,15 +20,21 @@ from seleniumbase import SB
 
 # ================= 配置区域 =================
 PROXY_URL = os.getenv("PROXY", "")
-COOKIE = os.getenv("COOKIE")  # 方案A: {"__Host-aclclouds":"...","XSRF-TOKEN":"..."}
+# 方案A JSON:
+# {"__Host-aclclouds_session":"...","XSRF-TOKEN":"..."}
+# 或纯字符串 = 仅 __Host-aclclouds_session 的 value
+COOKIE = os.getenv("COOKIE")
+XSRF_TOKEN = os.getenv("XSRF_TOKEN", "")  # 可选；JSON 里已带则可不设
 TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
-# 正确后台域名与路径（不要用 dash.aclclouds.com）
 BASE_HOST = "https://aclclouds.com"
 LOGIN_URL = f"{BASE_HOST}/auth/login"
 CHECK_URL = f"{BASE_HOST}/api/client"
 PROJECT_URL = f"{BASE_HOST}/dashboard/projects"
+
+# 会话 Cookie 真实名称（DevTools 里看到的）
+SESSION_COOKIE_NAME = "__Host-aclclouds_session"
 # ===========================================
 
 
@@ -99,6 +105,13 @@ class AclcloudsRenewal:
             return None
 
     def parse_cookies(self):
+        """
+        COOKIE 支持:
+          1) JSON: {"__Host-aclclouds_session":"...","XSRF-TOKEN":"..."}
+          2) 纯字符串: 当作 __Host-aclclouds_session 的 value
+        兼容旧键名 __Host-aclclouds -> 自动纠正为 _session
+        可选环境变量 XSRF_TOKEN
+        """
         if not COOKIE:
             raise RuntimeError("环境变量 COOKIE 未设置")
 
@@ -112,28 +125,41 @@ class AclcloudsRenewal:
                 raise RuntimeError(f"COOKIE JSON 解析失败: {e}") from e
             if not isinstance(data, dict) or not data:
                 raise RuntimeError(
-                    'COOKIE JSON 必须是非空对象，例如 '
-                    '{"__Host-aclclouds":"...","XSRF-TOKEN":"..."}'
+                    "COOKIE JSON 必须是非空对象，例如 "
+                    '{"__Host-aclclouds_session":"...","XSRF-TOKEN":"..."}'
                 )
             for name, value in data.items():
                 if value is None or str(value).strip() == "":
                     self.log(f"⚠️ 跳过空 cookie: {name}")
                     continue
-                cookies.append((str(name), str(value).strip()))
+                name = str(name).strip()
+                value = str(value).strip()
+                # 纠正旧键名
+                if name == "__Host-aclclouds":
+                    self.log("⚠️ 检测到旧键名 __Host-aclclouds，已纠正为 __Host-aclclouds_session")
+                    name = SESSION_COOKIE_NAME
+                cookies.append((name, value))
         else:
-            cookies.append(("__Host-aclclouds", raw))
+            cookies.append((SESSION_COOKIE_NAME, raw))
+
+        # 可选单独 XSRF
+        xsrf = (XSRF_TOKEN or "").strip()
+        if xsrf and not any(n == "XSRF-TOKEN" for n, _ in cookies):
+            cookies.append(("XSRF-TOKEN", xsrf))
 
         names = [n for n, _ in cookies]
-        if "__Host-aclclouds" not in names:
-            self.log("⚠️ COOKIE 中未包含 __Host-aclclouds，登录可能失败")
-        if "XSRF-TOKEN" not in names:
-            self.log("⚠️ COOKIE 中未包含 XSRF-TOKEN，部分接口可能失败")
-
         self.log(f"将注入 Cookie: {', '.join(names)}")
+
+        if SESSION_COOKIE_NAME not in names:
+            raise RuntimeError(
+                f"缺少 {SESSION_COOKIE_NAME}。"
+                "请从浏览器复制该 Cookie 的完整 value，"
+                'JSON 示例: {"__Host-aclclouds_session":"...","XSRF-TOKEN":"..."}'
+            )
         return cookies
 
     def inject_cookies(self, sb):
-        """在 aclclouds.com 上注入会话 Cookie（__Host- 仅对当前 host 有效）"""
+        """在 aclclouds.com 上注入会话 Cookie"""
         cookies = self.parse_cookies()
 
         self.log("🔗 访问登录页（挂载 Cookie 域）...")
@@ -165,7 +191,7 @@ class AclcloudsRenewal:
 
             try:
                 sb.add_cookie(c)
-                self.log(f"✅ 已注入: {name}")
+                self.log(f"✅ 已注入: {name} (len={len(value)})")
             except Exception as e:
                 self.log(f"❌ 注入失败 {name}: {e}")
                 if name.startswith("__Host-"):
@@ -179,11 +205,25 @@ class AclcloudsRenewal:
                 else:
                     raise
 
+        # 自检：浏览器里实际有哪些 cookie
+        try:
+            present = [c.get("name") for c in sb.driver.get_cookies()]
+            self.log(f"浏览器当前 Cookie: {present}")
+            for c in sb.driver.get_cookies():
+                if c.get("name") in (SESSION_COOKIE_NAME, "XSRF-TOKEN"):
+                    v = c.get("value") or ""
+                    self.log(
+                        f"  {c.get('name')}: len={len(v)} "
+                        f"head={v[:16]}... tail=...{v[-8:]}"
+                    )
+        except Exception as e:
+            self.log(f"读取 Cookie 列表失败: {e}")
+
         self.log("✅ Cookie 注入完成")
         time.sleep(1)
 
     def assert_on_projects_page(self, sb):
-        """确保停在正确的项目页，而不是 404 / 登录页"""
+        """确保停在 /dashboard/projects，而不是 404 / 登录页"""
         url = sb.get_current_url()
         title = ""
         try:
@@ -202,17 +242,19 @@ class AclcloudsRenewal:
             )
             raise RuntimeError(f"期望 aclclouds.com，实际: {url}")
 
-        # 旧路径 /projects 是 404，必须是 /dashboard/projects
-        if "/dashboard/projects" not in url:
-            # 若被踢到登录
-            if "/auth/login" in url or url.rstrip("/").endswith("/login"):
-                photo = self.save_debug(sb, "not_logged_in")
-                self.send_telegram_notify(
-                    "❌ Cookie 无效或已过期，仍在登录页。请更新 Secrets.COOKIE",
-                    photo,
-                )
-                raise RuntimeError("Cookie 无效或已过期，仍在登录页")
+        if "/auth/login" in url or url.rstrip("/").endswith("/login"):
+            photo = self.save_debug(sb, "not_logged_in")
+            self.send_telegram_notify(
+                "❌ Cookie 无效或已过期，仍在登录页。\n"
+                f"请确认 Secrets.COOKIE 使用键名 {SESSION_COOKIE_NAME}",
+                photo,
+            )
+            raise RuntimeError(
+                f"Cookie 无效或已过期，仍在登录页。"
+                f"请确认使用 {SESSION_COOKIE_NAME}（不是 __Host-aclclouds）"
+            )
 
+        if "/dashboard/projects" not in url:
             photo = self.save_debug(sb, "wrong_path")
             self.send_telegram_notify(
                 f"❌ 未进入 /dashboard/projects\nURL: {url}\nTitle: {title}",
@@ -220,7 +262,7 @@ class AclcloudsRenewal:
             )
             raise RuntimeError(
                 f"期望路径 /dashboard/projects，实际: {url}。"
-                "注意：https://aclclouds.com/projects 是 Not Found"
+                "注意：/projects 是 Not Found"
             )
 
         bad_titles = ("not found", "404", "page not found")
@@ -239,7 +281,6 @@ class AclcloudsRenewal:
         time.sleep(3)
 
         url = sb.get_current_url()
-        # 被错误跳到旧路径时强制纠正
         if "/dashboard/projects" not in url and "/auth/login" not in url:
             self.log(f"⚠️ 当前不在项目页: {url}，强制重新打开")
             sb.open(PROJECT_URL)
@@ -257,7 +298,6 @@ class AclcloudsRenewal:
             time.sleep(3)
             self.assert_on_projects_page(sb)
 
-        # API 探测（辅助）
         try:
             api_status = sb.execute_script(
                 """
@@ -315,7 +355,7 @@ class AclcloudsRenewal:
                     pass
 
         if not page_ok:
-            photo = self.save_debug(sb, "projects_not_ready")
+            self.save_debug(sb, "projects_not_ready")
             raise RuntimeError(
                 "已打开 /dashboard/projects 但未识别到项目页内容。"
                 "请查看 artifacts/projects_not_ready.html"
@@ -401,6 +441,7 @@ class AclcloudsRenewal:
         self.log("🎯 正在启动 Chrome 浏览器...")
         self.log(f"目标主机: {BASE_HOST}")
         self.log(f"项目页: {PROJECT_URL}")
+        self.log(f"会话 Cookie 名: {SESSION_COOKIE_NAME}")
 
         if not COOKIE:
             self.log("❌ 环境变量 COOKIE 未设置")
@@ -439,10 +480,10 @@ class AclcloudsRenewal:
                 except Exception:
                     self.log("⚠️ IP 检测跳过...")
 
-                # 2. 注入 Cookie（aclclouds.com）
+                # 2. 注入 Cookie
                 self.inject_cookies(sb)
 
-                # 3. 进正确项目页
+                # 3. 进项目页
                 self.log("📂 进入 Project 页面并校验登录态")
                 self.ensure_logged_in(sb)
                 time.sleep(2)
