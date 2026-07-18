@@ -20,15 +20,15 @@ from seleniumbase import SB
 
 # ================= 配置区域 =================
 PROXY_URL = os.getenv("PROXY", "")
-COOKIE = os.getenv("COOKIE")  # 方案A JSON: {"__Host-aclclouds":"...","XSRF-TOKEN":"..."}
+COOKIE = os.getenv("COOKIE")  # 方案A: {"__Host-aclclouds":"...","XSRF-TOKEN":"..."}
 TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHAT_ID = os.getenv("TG_CHAT_ID")
 
-# 必须用 dash 子域（__Host- cookie 仅对当前 host 生效）
-BASE_HOST = "https://dash.aclclouds.com"
+# 正确后台域名与路径（不要用 dash.aclclouds.com）
+BASE_HOST = "https://aclclouds.com"
 LOGIN_URL = f"{BASE_HOST}/auth/login"
 CHECK_URL = f"{BASE_HOST}/api/client"
-PROJECT_URL = f"{BASE_HOST}/projects"
+PROJECT_URL = f"{BASE_HOST}/dashboard/projects"
 # ===========================================
 
 
@@ -133,18 +133,17 @@ class AclcloudsRenewal:
         return cookies
 
     def inject_cookies(self, sb):
-        """在 dash.aclclouds.com 上注入会话 Cookie"""
+        """在 aclclouds.com 上注入会话 Cookie（__Host- 仅对当前 host 有效）"""
         cookies = self.parse_cookies()
 
-        self.log("🔗 访问 dash 登录页（挂载 Cookie 域）...")
+        self.log("🔗 访问登录页（挂载 Cookie 域）...")
         sb.uc_open_with_reconnect(LOGIN_URL, reconnect_time=25)
         time.sleep(2)
 
-        # 若被重定向到非 dash 域，强制回 dash
         cur = sb.get_current_url()
         self.log(f"登录页当前 URL: {cur}")
-        if "dash.aclclouds.com" not in cur:
-            self.log("⚠️ 未停在 dash 域，强制打开 LOGIN_URL")
+        if "aclclouds.com" not in cur:
+            self.log("⚠️ 未停在 aclclouds.com，强制打开 LOGIN_URL")
             sb.open(LOGIN_URL)
             time.sleep(2)
 
@@ -162,7 +161,7 @@ class AclcloudsRenewal:
             }
             # __Host- 禁止设置 domain
             if not name.startswith("__Host-"):
-                c["domain"] = "dash.aclclouds.com"
+                c["domain"] = "aclclouds.com"
 
             try:
                 sb.add_cookie(c)
@@ -183,8 +182,8 @@ class AclcloudsRenewal:
         self.log("✅ Cookie 注入完成")
         time.sleep(1)
 
-    def assert_on_dash_projects(self, sb):
-        """确保停在 dash 项目页，而不是主站 404"""
+    def assert_on_projects_page(self, sb):
+        """确保停在正确的项目页，而不是 404 / 登录页"""
         url = sb.get_current_url()
         title = ""
         try:
@@ -195,25 +194,34 @@ class AclcloudsRenewal:
         self.log(f"当前 URL: {url}")
         self.log(f"页面标题: {title}")
 
-        # 主站 /projects 是 404（你这次日志就是这个）
-        if "dash.aclclouds.com" not in url:
+        if "aclclouds.com" not in url:
             photo = self.save_debug(sb, "wrong_host")
             self.send_telegram_notify(
-                f"❌ 打开了错误域名（非 dash）\nURL: {url}\nTitle: {title}",
+                f"❌ 打开了错误域名\nURL: {url}\nTitle: {title}",
+                photo,
+            )
+            raise RuntimeError(f"期望 aclclouds.com，实际: {url}")
+
+        # 旧路径 /projects 是 404，必须是 /dashboard/projects
+        if "/dashboard/projects" not in url:
+            # 若被踢到登录
+            if "/auth/login" in url or url.rstrip("/").endswith("/login"):
+                photo = self.save_debug(sb, "not_logged_in")
+                self.send_telegram_notify(
+                    "❌ Cookie 无效或已过期，仍在登录页。请更新 Secrets.COOKIE",
+                    photo,
+                )
+                raise RuntimeError("Cookie 无效或已过期，仍在登录页")
+
+            photo = self.save_debug(sb, "wrong_path")
+            self.send_telegram_notify(
+                f"❌ 未进入 /dashboard/projects\nURL: {url}\nTitle: {title}",
                 photo,
             )
             raise RuntimeError(
-                f"期望 dash.aclclouds.com，实际: {url}。"
-                "主站 aclclouds.com/projects 是 Not Found。"
+                f"期望路径 /dashboard/projects，实际: {url}。"
+                "注意：https://aclclouds.com/projects 是 Not Found"
             )
-
-        if "/auth/login" in url or url.rstrip("/").endswith("/login"):
-            photo = self.save_debug(sb, "not_logged_in")
-            self.send_telegram_notify(
-                "❌ Cookie 无效或已过期，仍在登录页。请更新 Secrets.COOKIE",
-                photo,
-            )
-            raise RuntimeError("Cookie 无效或已过期，仍在登录页")
 
         bad_titles = ("not found", "404", "page not found")
         if any(t in title.lower() for t in bad_titles):
@@ -224,29 +232,20 @@ class AclcloudsRenewal:
             )
             raise RuntimeError(f"项目页 Not Found: {url} / {title}")
 
-        # 正文里常见 404 文案
-        try:
-            body = sb.get_text("body")[:500].lower()
-            if "not found" in body and "project" not in body:
-                # 宽松判断：标题已过则这里再兜底
-                pass
-        except Exception:
-            pass
-
     def ensure_logged_in(self, sb):
-        """打开 dash 项目页并确认登录有效"""
+        """打开正确项目页并确认登录有效"""
         self.log(f"打开项目页: {PROJECT_URL}")
         sb.uc_open_with_reconnect(PROJECT_URL, reconnect_time=25)
         time.sleep(3)
 
-        # 若被跳到主站，强制再开一次 dash（不跟坏跳转）
         url = sb.get_current_url()
-        if "dash.aclclouds.com" not in url:
-            self.log(f"⚠️ 被重定向到: {url}，强制重新打开 dash 项目页")
+        # 被错误跳到旧路径时强制纠正
+        if "/dashboard/projects" not in url and "/auth/login" not in url:
+            self.log(f"⚠️ 当前不在项目页: {url}，强制重新打开")
             sb.open(PROJECT_URL)
             time.sleep(3)
 
-        self.assert_on_dash_projects(sb)
+        self.assert_on_projects_page(sb)
 
         if sb.is_element_visible("text=Anti-bot confirmation"):
             self.log("检测到人机验证页，尝试处理...")
@@ -256,9 +255,9 @@ class AclcloudsRenewal:
                 if not sb.is_element_visible("text=Anti-bot confirmation"):
                     break
             time.sleep(3)
-            self.assert_on_dash_projects(sb)
+            self.assert_on_projects_page(sb)
 
-        # API 探测（仅作辅助；页面 404 时不能只靠这个）
+        # API 探测（辅助）
         try:
             api_status = sb.execute_script(
                 """
@@ -286,13 +285,13 @@ class AclcloudsRenewal:
         except Exception as e:
             self.log(f"API 登录探测跳过: {e}")
 
-        # 额外确认：页面应出现 My Projects / 项目相关文案
         ready_texts = [
             "My Projects",
             "Total Projects",
             "Create Project",
             "Expires",
             "Manage",
+            "Active Projects",
         ]
         page_ok = False
         for t in ready_texts:
@@ -305,7 +304,6 @@ class AclcloudsRenewal:
                 pass
 
         if not page_ok:
-            # 再等一会 SPA 渲染
             time.sleep(5)
             for t in ready_texts:
                 try:
@@ -319,12 +317,12 @@ class AclcloudsRenewal:
         if not page_ok:
             photo = self.save_debug(sb, "projects_not_ready")
             raise RuntimeError(
-                "已在 dash 域但未识别到项目页内容，可能是前端未加载或 Cookie 权限不足。"
+                "已打开 /dashboard/projects 但未识别到项目页内容。"
                 "请查看 artifacts/projects_not_ready.html"
             )
 
     def get_expiry_time(self, sb, timeout=25):
-        """多策略读取过期时间（兼容 class 改版 / 法语文案 7j 4h）"""
+        """多策略读取过期时间（兼容 class 改版 / 7j 4h）"""
         css_selectors = [
             ".projects-card-expiry .projects-expiry-value",
             ".projects-expiry-value",
@@ -336,7 +334,6 @@ class AclcloudsRenewal:
 
         deadline = time.time() + timeout
         while time.time() < deadline:
-            # 1) CSS
             for sel in css_selectors:
                 try:
                     if sb.is_element_visible(sel):
@@ -347,12 +344,10 @@ class AclcloudsRenewal:
                 except Exception:
                     pass
 
-            # 2) 文案：Expires in / 7j 4h
             try:
                 found = sb.execute_script(
                     r"""
                     const body = document.body ? document.body.innerText : '';
-                    // 例如: Expires in\n7j 4h  或  Expires in 7j 4h
                     let m = body.match(/Expires\s*in\s*([0-9]+\s*[jdhm]\s*[0-9]*\s*[jdhm]?)/i);
                     if (m) return m[1].trim();
                     m = body.match(/([0-9]+\s*j\s*[0-9]+\s*h)/i);
@@ -405,6 +400,7 @@ class AclcloudsRenewal:
         self.log("=" * 40)
         self.log("🎯 正在启动 Chrome 浏览器...")
         self.log(f"目标主机: {BASE_HOST}")
+        self.log(f"项目页: {PROJECT_URL}")
 
         if not COOKIE:
             self.log("❌ 环境变量 COOKIE 未设置")
@@ -443,10 +439,10 @@ class AclcloudsRenewal:
                 except Exception:
                     self.log("⚠️ IP 检测跳过...")
 
-                # 2. 注入 Cookie（必须在 dash 域）
+                # 2. 注入 Cookie（aclclouds.com）
                 self.inject_cookies(sb)
 
-                # 3. 进 dash 项目页
+                # 3. 进正确项目页
                 self.log("📂 进入 Project 页面并校验登录态")
                 self.ensure_logged_in(sb)
                 time.sleep(2)
@@ -516,11 +512,11 @@ class AclcloudsRenewal:
                             except Exception as e:
                                 self.log(f"重试点击 Renew 失败: {e}")
 
-                # 6. 再进 dash 项目页
+                # 6. 再进项目页
                 self.log("📂 再次进入 Project 页面")
                 sb.uc_open_with_reconnect(PROJECT_URL, reconnect_time=25)
                 time.sleep(5)
-                if "dash.aclclouds.com" not in sb.get_current_url():
+                if "/dashboard/projects" not in sb.get_current_url():
                     sb.open(PROJECT_URL)
                     time.sleep(3)
                 self.close_modal_if_any(sb)
