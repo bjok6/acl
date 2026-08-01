@@ -2,7 +2,7 @@ name: Auto-Renew-ACL
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 2 */3 * *' # 每隔3天 12点(UTC 2点) 运行
+    - cron: '0 2 */2 * *' # 每隔2天 12点(UTC 2点) 运行
 
 jobs:
   Renew-acl:
