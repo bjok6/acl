@@ -157,11 +157,24 @@ def find_elements(root, selector):
 
 def find_renew_buttons(root):
     selectors = [
+        # ----- 保留原有的基于文字的匹配（兼容可能还没更新完毕的旧版页面） -----
         '.projects-renew-btn',
         './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")]',
         './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "reactivate")]',
         './/*[(@role="button" or self::a) and contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")]',
         './/*[(@role="button" or self::a) and contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "reactivate")]',
+        
+        # ----- 新增：针对 image_470823.png 中新版图标按钮的匹配 -----
+        # 1. 尝试匹配无障碍辅助标签（多数现代 UI 框架会给纯图标按钮加上这些属性）
+        './/button[contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")]',
+        './/button[contains(translate(@title, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")]',
+        
+        # 2. 尝试匹配可能存在的特定 class 命名
+        'button[class*="renew"]',
+        'button[class*="refresh"]',
+        
+        # 3. 匹配内部包含“刷新/同步”特征 SVG 的按钮（非常精准，避免误点右侧的删除或设置按钮）
+        './/button[.//svg[contains(@class, "refresh") or contains(@class, "sync") or contains(@class, "lucide-refresh")]]'
     ]
     buttons = []
     for selector in selectors:
@@ -169,6 +182,8 @@ def find_renew_buttons(root):
             buttons.extend(find_elements(root, selector))
         except Exception:
             continue
+            
+    # 只要按钮可见，即使没有文字也会被成功返回
     return unique_elements([button for button in buttons if element_text(button) or button.is_displayed()])
 
 def find_card_container_from_child(sb, child):
