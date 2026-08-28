@@ -635,7 +635,7 @@ def handle_captcha_challenge(sb, label='验证码', timeout=20):
             sb.sleep(0.8)
             continue
 
-        sb.sleep(1.2)
+        sb.sleep(4.5)
 
         try:
             checkbox = sb.driver.find_element(By.CSS_SELECTOR, 'div.auth-captcha-inner[role="checkbox"]')
