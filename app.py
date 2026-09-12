@@ -119,15 +119,12 @@ def dedupe_project_cards(cards):
 
         duplicate = False
         for kept in list(keep):
-            kept_text = element_text(kept)
+            # 如果 kept 是 card 的外层父节点（范围太大），丢弃外层，保留更精确的子节点
             if element_contains(kept, card):
+                keep.remove(kept)
+            # 如果 card 是 kept 的外层父节点，保留已有的精确子节点，跳过大范围的 card
+            elif element_contains(card, kept):
                 duplicate = True
-                break
-            if element_contains(card, kept):
-                if len(card_text) > len(kept_text):
-                    keep.remove(kept)
-                else:
-                    duplicate = True
                 break
 
         if not duplicate:
@@ -136,14 +133,8 @@ def dedupe_project_cards(cards):
     deduped = []
     seen_signatures = set()
     for card in keep:
-        text = element_text(card)
-        name = ''
-        for line in text.splitlines():
-            line = line.strip()
-            if line and not re.search(r'expires|renewal|renew|reactivate|suspended|expiry|expire|valid|续期|重新激活|恢复|暂停|过期|到期', line, re.I):
-                name = line
-                break
-        signature = (name.lower(), get_project_expiry(card).lower())
+        name = get_project_name(card, 0)
+        signature = name.lower()
         if signature in seen_signatures:
             continue
         seen_signatures.add(signature)
@@ -157,23 +148,15 @@ def find_elements(root, selector):
 
 def find_renew_buttons(root):
     selectors = [
-        # ----- 保留原有的基于文字的匹配（兼容可能还没更新完毕的旧版页面） -----
         '.projects-renew-btn',
         './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")]',
         './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "reactivate")]',
         './/*[(@role="button" or self::a) and contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")]',
-        './/*[(@role="button" or self::a) and contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "reactivate")]',
         
-        # ----- 新增：针对 image_470823.png 中新版图标按钮的匹配 -----
-        # 1. 尝试匹配无障碍辅助标签（多数现代 UI 框架会给纯图标按钮加上这些属性）
-        './/button[contains(translate(@aria-label, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")]',
-        './/button[contains(translate(@title, "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")]',
+        # 查找最深层的包含 renew 文本的元素，应对新 UI 复杂的 svg/span 嵌套
+        './/*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew") and not(.//*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")])]',
+        './/*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "reactivate") and not(.//*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "reactivate")])]',
         
-        # 2. 尝试匹配可能存在的特定 class 命名
-        'button[class*="renew"]',
-        'button[class*="refresh"]',
-        
-        # 3. 匹配内部包含“刷新/同步”特征 SVG 的按钮（非常精准，避免误点右侧的删除或设置按钮）
         './/button[.//svg[contains(@class, "refresh") or contains(@class, "sync") or contains(@class, "lucide-refresh")]]'
     ]
     buttons = []
@@ -183,39 +166,52 @@ def find_renew_buttons(root):
         except Exception:
             continue
             
-    # 只要按钮可见，即使没有文字也会被成功返回
-    return unique_elements([button for button in buttons if element_text(button) or button.is_displayed()])
+    return unique_elements([button for button in buttons if button.is_displayed()])
 
 def find_card_container_from_child(sb, child):
     return sb.driver.execute_script(
         '''
         const start = arguments[0];
         let node = start;
-        for (let i = 0; node && i < 10; i += 1, node = node.parentElement) {
+        let bestCandidate = start;
+        for (let i = 0; node && i < 15; i += 1, node = node.parentElement) {
+          const tag = (node.tagName || '').toLowerCase();
+          if (tag === 'body' || tag === 'html' || tag === 'main' || tag === 'article') {
+              break; 
+          }
           const text = (node.innerText || '').trim();
           const cls = (node.className || '').toString().toLowerCase();
+          
+          // 针对新版 UI 的强特征识别：卡片内通常包含 Manage/Modify 以及 RAM/Storage
+          const hasActions = /manage|modify|delete/i.test(text);
+          const hasSpecs = /ram|storage/i.test(text);
+          const hasRenew = /renew|reactivate|expire/i.test(text);
+          
+          if (hasActions && hasSpecs && hasRenew && text.length < 2000) {
+              return node;
+          }
+          
           const looksLikeProject = /renew|reactivate|suspended|expiry|expire|expires|valid|续期|重新激活|恢复|暂停|过期|到期/i.test(text);
           const looksLikeCard = /card|project|service|server|item|row/.test(cls);
-          if (node !== start && text.length > 20 && (looksLikeProject || looksLikeCard)) {
-            return node;
+          if (node !== start && text.length > 20 && text.length < 2000 && (looksLikeProject || looksLikeCard)) {
+            bestCandidate = node;
           }
         }
-        return start.parentElement || start;
+        return bestCandidate !== start ? bestCandidate : (start.parentElement || start);
         ''',
         child,
     )
 
 def find_project_cards(sb):
+    cards = []
     candidate_selectors = [
         '.projects-card',
         '[class*="projects-card"]',
         '[class*="project"][class*="card"]',
         '[class*="Project"][class*="Card"]',
         '[class*="service"][class*="card"]',
-        '[class*="server"][class*="card"]',
-        'article',
+        '[class*="server"][class*="card"]'
     ]
-    cards = []
     for selector in candidate_selectors:
         try:
             for card in sb.driver.find_elements(By.CSS_SELECTOR, selector):
@@ -225,17 +221,12 @@ def find_project_cards(sb):
         except Exception:
             continue
 
-    if cards:
-        return dedupe_project_cards(cards)
-
+    # 统一收集所有候选卡片，由 dedupe 函数竞争保留最内层
     for button in find_renew_buttons(sb.driver):
         try:
             cards.append(find_card_container_from_child(sb, button))
         except Exception:
             continue
-
-    if cards:
-        return dedupe_project_cards(cards)
 
     expiry_xpath = (
         '//*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "expiry") '
@@ -243,11 +234,13 @@ def find_project_cards(sb):
         'or contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "valid") '
         'or contains(normalize-space(.), "过期") or contains(normalize-space(.), "到期")]'
     )
-    for elem in sb.driver.find_elements(By.XPATH, expiry_xpath):
-        try:
+    try:
+        # 只抓最底层的 expiry 文本向上查找
+        deepest_expiry_xpath = expiry_xpath + '[not(.//*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "expire")])]'
+        for elem in sb.driver.find_elements(By.XPATH, deepest_expiry_xpath):
             cards.append(find_card_container_from_child(sb, elem))
-        except Exception:
-            continue
+    except Exception:
+        pass
 
     return dedupe_project_cards(cards)
 
@@ -333,7 +326,9 @@ def get_project_expiry(card):
                 duration_text = extract_duration_like(text)
                 if duration_text:
                     return duration_text
-                if text and len(text) <= 120:
+                
+                # 只有文本明确包含时间/过期关键词，且文本很短时才兜底返回（防截取整段文字）
+                if text and len(text) <= 50 and re.search(r'expire|expiry|valid|date|days|hours|h|d|/|-|剩余|还有|过期|到期', text, re.I):
                     return text
         except Exception:
             continue
