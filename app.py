@@ -319,7 +319,7 @@ def get_project_expiry(card):
                 if duration_text:
                     return duration_text
                 
-                if text and len(text) <= 50 and re.search(r'expire|expiry|valid|date|days|hours|h|d|/|-|剩余|还有|过期|到期', text, re.I):
+                if text and len(text) <= 50 and re.search(r'expire|expiry|valid|date|days|hours|h|d|j|剩余|还有|过期|到期', text, re.I):
                     return text
         except Exception:
             continue
@@ -345,34 +345,6 @@ def get_card_by_index(sb, idx):
     if idx <= len(cards):
         return cards[idx - 1]
     return None
-
-def wait_for_renew_result(sb, idx, timeout=30):
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            success_modals = sb.driver.find_elements(
-                By.XPATH,
-                '//div[contains(@class, "modal") and contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "successfully")]',
-            )
-            if any(modal.is_displayed() for modal in success_modals):
-                card = get_card_by_index(sb, idx)
-                return True, get_project_expiry(card) if card else '未知', 'success modal'
-
-            card = get_card_by_index(sb, idx)
-            if card:
-                renewal_note = get_renewal_available_note(card)
-                renew_buttons = find_renew_buttons(card)
-                if renewal_note and not renew_buttons:
-                    return True, get_project_expiry(card), renewal_note
-        except Exception as e:
-            print(f"检查续期结果时暂时失败: {e}")
-
-        sb.sleep(1)
-
-    card = get_card_by_index(sb, idx)
-    note = get_renewal_available_note(card) if card else ''
-    expiry = get_project_expiry(card) if card else '未知'
-    return False, expiry, note
 
 def get_renew_note(card):
     selectors = [
@@ -410,22 +382,7 @@ def log_projects_page_diagnostics(sb):
     print(f"项目页诊断标题: {title}")
     print(f"项目页可见文本摘要: {body_text[:1200]}")
 
-def has_renew_antibot_modal(sb):
-    selectors = [
-        '//div[contains(., "Anti-bot confirmation")]',
-        '//div[contains(., "Confirm you are human")]',
-        '//div[contains(., "I am not a robot")]',
-    ]
-    for selector in selectors:
-        try:
-            if any(elem.is_displayed() for elem in sb.driver.find_elements(By.XPATH, selector)):
-                return True
-        except Exception:
-            continue
-    return False
-
 def click_captcha_checkbox(sb, label='验证码', timeout=10):
-    """点击 ACLClouds 页面上的人机验证复选框，并处理图形验证码挑战。"""
     selectors = [
         'div.auth-captcha-inner[role="checkbox"]',
         '//div[contains(., "Anti-bot confirmation")]//*[@role="checkbox"]',
@@ -468,13 +425,11 @@ def click_captcha_checkbox(sb, label='验证码', timeout=10):
             print(f"{label} 验证未完成，当前状态: {checked}")
             return False
     except Exception:
-        return True # 如果无法获取属性但挑战已消失，默认通过
+        return True
 
 def handle_captcha_challenge(sb, label='验证码', timeout=20):
-    """处理图形验证码挑战：多维度文本提取 + 轮流尝试机制"""
     start_time = time.time()
     challenge = None
-    last_error = None
     challenge_selectors = [
         '.auth-captcha-challenge',
         '.auth-capcha-challenge',
@@ -513,7 +468,6 @@ def handle_captcha_challenge(sb, label='验证码', timeout=20):
         sb.sleep(0.3)
 
     if not challenge:
-        # 如果没有跳出挑战窗口，视为直接通过
         return True
 
     target = ''
@@ -567,7 +521,6 @@ def handle_captcha_challenge(sb, label='验证码', timeout=20):
             continue
 
         candidate = None
-        # 【关键修复】：多维度提取每个选项的文本、alt、title 和图片 src
         if target:
             for opt in options:
                 opt_info = (opt.text or '').strip()
@@ -586,7 +539,6 @@ def handle_captcha_challenge(sb, label='验证码', timeout=20):
                     print(f"{label} 精准匹配到目标 '{target}' 的选项！")
                     break
 
-        # 【关键修复】：如果没精准匹配到文本，按尝试轮次依次测试不同序号的选项，不重复点击第一个
         if candidate is None:
             chosen_idx = attempts % len(options)
             candidate = options[chosen_idx]
@@ -636,6 +588,7 @@ def build_success_message(project_name, old_expiry, new_expiry):
         "🇫🇷 Aclclouds 续期通知",
         "",
         "✅ 续期成功",
+        f"⏱️ 旧过期时间: {old_expiry}",
         f"⏱️ 新过期时间: {new_expiry}",
         f"👤 登录账户: {masked_email}",
         f"⏱️ 运行时间: {beijing_time_str()}",
@@ -662,16 +615,15 @@ def build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note)
         f"❌ 续期状态未确认: {project_name}",
         f"👤 登录账户: {masked_email}",
     ]
-    if old_expiry and old_expiry.lower() not in ['suspended', 'paused', '暂停']:
+    if old_expiry:
         lines.append(f"旧过期: {old_expiry}")
     lines.extend([
         f"当前过期: {new_expiry}",
-        f"页面提示: {result_note or '未发现成功提示'}",
+        f"页面提示: {result_note or '未发现状态更新'}",
     ])
     return "\n".join(lines)
 
 def handle_renew_antibot(sb, project_name):
-    """Renew 后如果弹出 Anti-bot confirmation，则点击确认。"""
     modal_selectors = [
         '//div[contains(., "Anti-bot confirmation")]',
         '//div[contains(., "Confirm you are human")]',
@@ -686,7 +638,7 @@ def handle_renew_antibot(sb, project_name):
         except Exception:
             continue
 
-    print(f"[{project_name}] 未检测到续期人机验证窗口，继续等待续期结果")
+    print(f"[{project_name}] 未检测到续期人机验证窗口，继续等待状态变更")
     return False
 
 def js_set_input_value(sb, selector, value):
@@ -722,34 +674,24 @@ def fill_input(sb, selector, value, label, timeout=15):
         print(f"{label}输入未生效，使用 JavaScript 强制赋值并触发事件")
         js_set_input_value(sb, selector, value)
         entered_value = sb.get_value(selector)
-        if label == '密码':
-            print(f"JS 赋值后{label}长度: {len(entered_value)}")
-        else:
-            print(f"JS 赋值后{label}值: '{entered_value}'")
 
     return entered_value == value
 
 def login(sb, email, password):
-    """执行登录，返回是否成功"""
     print("开始登录流程...")
-
-    # ---- 填写邮箱 ----
     if not fill_input(sb, '#username', email, '邮箱'):
-        print("⚠️ 邮箱仍未能正确填入，可能页面有动态行为。")
+        print("⚠️ 邮箱仍未能正确填入")
 
-    # ---- 填写密码 ----
     if not fill_input(sb, '#password', password, '密码'):
-        print("⚠️ 密码仍未能正确填入。")
+        print("⚠️ 密码仍未能正确填入")
 
-    # ---- 验证码 ----
     captcha_ok = click_captcha_checkbox(sb, '登录验证码')
     if not captcha_ok:
-        print("⚠️ 登录验证码未完成，暂不点击登录按钮，避免直接提交。")
+        print("⚠️ 登录验证码未完成，暂不点击登录按钮")
         return False
 
     sb.sleep(1)
 
-    # ---- 点击登录按钮 ----
     login_page_url = sb.get_current_url()
     clicked = False
 
@@ -766,7 +708,6 @@ def login(sb, email, password):
         except Exception as e:
             print(f"选择器 {selector} 失败: {e}")
     if not clicked:
-        print("所有选择器失败，使用 JS 点击")
         sb.execute_script('''
             var els = document.querySelectorAll('div, button, a');
             for (var el of els) {
@@ -778,7 +719,6 @@ def login(sb, email, password):
             return false;
         ''')
 
-    # ---- 等待登录结果 ----
     try:
         wait_for_url_change(sb, login_page_url, timeout=30)
         if '/auth/login' not in sb.get_current_url():
@@ -786,13 +726,7 @@ def login(sb, email, password):
             print("✅ 登录成功！")
             return True
         else:
-            error_msg = ""
-            try:
-                errors = sb.driver.find_elements(By.CSS_SELECTOR, '.auth-error-text, .alert-danger, .error-message')
-                error_msg = errors[0].text.strip() if errors else ''
-            except:
-                pass
-            print(f"❌ 登录失败，错误: {error_msg}")
+            print("❌ 登录失败")
             return False
     except Exception as e:
         print(f"登录过程异常: {e}")
@@ -807,7 +741,6 @@ def get_current_ip(proxy_server: str = "") -> str:
     return response.text.strip()
 
 def main():
-
     IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
     PROXY_SERVER = os.getenv('S5_PROXY') or os.getenv('PROXY_SERVER') or "socks://127.0.0.1:1080"
 
@@ -834,16 +767,16 @@ def main():
 
         if is_login_page(sb):
             if not EMAIL or not PASSWORD:
-                print("❌ 未配置 ACL_EMAIL 或 ACL_PASSWORD，无法执行账号密码登录。")
-                send_telegram("⚠️ 未配置 ACL_EMAIL 或 ACL_PASSWORD。")
+                print("❌ 未配置 EMAIL 或 PASSWORD，无法执行登录。")
+                send_telegram("⚠️ 未配置 EMAIL 或 PASSWORD。")
                 return
             if not login(sb, EMAIL, PASSWORD):
                 return
         elif is_logged_in(sb):
-            print(f"✅ 当前已登录。URL: {sb.get_current_url()}，标题: {sb.get_title()}")
+            print(f"✅ 当前已登录。URL: {sb.get_current_url()}")
         else:
-            print(f"❌ 未能确认登录状态。URL: {sb.get_current_url()}，标题: {sb.get_title()}")
-            send_telegram("⚠️ 未能确认登录状态，请检查账号密码配置。")
+            print(f"❌ 未能确认登录状态。")
+            send_telegram("⚠️ 未能确认登录状态。")
             return
 
         sb.open(PROJECTS_URL)
@@ -872,12 +805,29 @@ def main():
                     safe_click_element(sb, renew_btn[0], f"[{project_name}] {action_label}按钮")
                     print(f"[{project_name}] 点击 {action_label}...")
                     handle_renew_antibot(sb, project_name)
-                    success, new_expiry, result_note = wait_for_renew_result(sb, idx, timeout=30)
-                    if success:
-                        print(f"续期成功！状态: {result_note}，新过期: {new_expiry}")
-                        send_telegram(build_success_message(project_name, old_expiry, new_expiry))
+
+                    # 点击续期并解完验证码后，等待 3 秒并刷新页面获取最新时间
+                    print(f"[{project_name}] 正在刷新页面确认续期结果...")
+                    sb.sleep(3)
+                    sb.refresh()
+                    sb.wait_for_ready_state_complete()
+                    sb.sleep(2)
+
+                    updated_cards = find_project_cards(sb)
+                    if idx <= len(updated_cards):
+                        updated_card = updated_cards[idx - 1]
+                        new_expiry = get_project_expiry(updated_card)
+                        renew_btn_after = find_renew_buttons(updated_card)
+
+                        # 对比：过期时间变化了，或者 Renew 按钮消失了，直接判定为成功！
+                        if (old_expiry and new_expiry and old_expiry != new_expiry) or not renew_btn_after:
+                            print(f"[{project_name}] 续期成功！旧时间: {old_expiry} -> 新时间: {new_expiry}")
+                            send_telegram(build_success_message(project_name, old_expiry, new_expiry))
+                        else:
+                            print(f"[{project_name}] 状态未确认，新旧时间一致: {new_expiry}")
+                            send_telegram(build_unconfirmed_message(project_name, old_expiry, new_expiry, "刷新后时间未发生变化"))
                     else:
-                        send_telegram(build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note))
+                        send_telegram(build_success_message(project_name, old_expiry, "已刷新（页面结构已变动）"))
                 else:
                     note = get_renew_note(card)
                     print(f"无 Renew 按钮，提示: {note}")
