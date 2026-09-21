@@ -11,14 +11,14 @@ from selenium.common.exceptions import ElementClickInterceptedException, WebDriv
 from selenium.webdriver.common.by import By
 from zoneinfo import ZoneInfo
 
-# ----- 配置（可从环境变量读取或在双引号内填写） -----
+# ----- 配置（从环境变量读取或在双引号内填写） -----
 EMAIL = os.getenv('EMAIL') or ""
 PASSWORD = os.getenv('PASSWORD') or ""
 TG_CHAT_ID = os.getenv('TG_CHAT_ID') or ""
 TG_BOT_TOKEN = os.getenv('TG_BOT_TOKEN') or ""
 
 LOGIN_PATH = '/auth/login'
-BASE_URL = 'https://dash.aclclouds.com'
+BASE_URL = 'https://aclclouds.com'
 PROJECTS_URL = f'{BASE_URL}/dashboard/projects'
 
 def beijing_time_str():
@@ -53,7 +53,7 @@ def is_login_page(sb):
 
 def is_logged_in(sb):
     current_url = sb.get_current_url()
-    return (BASE_URL in current_url or 'aclclouds.com' in current_url) and LOGIN_PATH not in current_url
+    return BASE_URL in current_url and LOGIN_PATH not in current_url
 
 def scroll_to_selector(sb, selector):
     sb.scroll_to(selector)
@@ -298,48 +298,47 @@ def mask_email(email):
         masked_local = f"{local[:2]}****{local[-2:]}"
     return f"{masked_local}@{domain}"
 
-def build_success_message(server_name, old_expiry, new_expiry):
+def build_success_message(server_name, old_status, new_status):
     masked_email = mask_email(EMAIL)
     lines = [
         "🇫🇷 Aclclouds 续期通知",
         "",
-        f"✅ 续期成功: {server_name}",
-        f"⏱️ 旧剩余时间: {old_expiry}",
-        f"⏱️ 新剩余时间: {new_expiry}",
+        f"✅ 续期/恢复成功: {server_name}",
+        f"⏱️ 旧状态: {old_status}",
+        f"⏱️ 新状态: {new_status}",
         f"👤 登录账户: {masked_email}",
         f"⏱️ 运行时间: {beijing_time_str()}",
     ]
     return "\n".join(lines)
 
-def build_not_yet_due_message(server_name, expiry):
+def build_not_yet_due_message(server_name, status):
     masked_email = mask_email(EMAIL)
     lines = [
         "🇫🇷 Aclclouds 续期通知",
         "",
         f"⏳ 未到续期时间: {server_name}",
-        f"⏱️ 当前剩余时间: {expiry}",
+        f"⏱️ 当前状态/剩余: {status}",
         f"👤 登录账户: {masked_email}",
         f"⏱️ 运行时间: {beijing_time_str()}",
     ]
     return "\n".join(lines)
 
-def handle_renew_antibot(sb, project_name):
+def handle_renew_antibot(sb, server_name):
     modal_selectors = [
         '//div[contains(., "Anti-bot confirmation")]',
         '//div[contains(., "Confirm you are human")]',
         '//div[contains(., "I am not a robot")]',
-        '//div[contains(@class, "modal") and contains(., "Secured by ACLClouds")]',
     ]
 
     for selector in modal_selectors:
         try:
             sb.wait_for_element_visible(selector, timeout=5)
-            print(f"[{project_name}] 检测到续期人机验证窗口")
-            return click_captcha_checkbox(sb, '续期人机验证', timeout=5)
+            print(f"[{server_name}] 检测到人机验证窗口")
+            return click_captcha_checkbox(sb, '续期/激活人机验证', timeout=5)
         except Exception:
             continue
 
-    print(f"[{project_name}] 未检测到续期人机验证窗口，继续等待状态变更")
+    print(f"[{server_name}] 未检测到人机验证窗口，继续下一步")
     return False
 
 def js_set_input_value(sb, selector, value):
@@ -442,18 +441,20 @@ def get_current_ip(proxy_server: str = "") -> str:
     return response.text.strip()
 
 def process_server_page(sb, server_url):
+    """进入单个服务器详情页处理续期或重新激活"""
     print(f"\n正在访问服务器详情页: {server_url}")
     sb.open(server_url)
     sb.wait_for_ready_state_complete()
     sb.sleep(2)
 
+    # 1. 获取服务器名称 (如 okdan)
     server_name = "未知服务器"
     try:
-        for selector in ['h1', 'h2', 'h3', 'div[class*="title"]']:
+        for selector in ['h1', 'h2', 'div[class*="title"]']:
             elems = sb.driver.find_elements(By.CSS_SELECTOR, selector)
             for elem in elems:
                 text = element_text(elem)
-                if text and len(text) < 40 and text.lower() not in ['console', 'version', 'files', 'aclclouds', 'menu', 'back']:
+                if text and len(text) < 40 and text.lower() not in ['console', 'version', 'files', 'aclclouds']:
                     server_name = text
                     break
             if server_name != "未知服务器":
@@ -461,64 +462,76 @@ def process_server_page(sb, server_url):
     except Exception:
         pass
 
-    time_text = "未知"
+    # 2. 获取剩余时间或停机状态
+    status_text = "未知"
     try:
         page_text = sb.driver.find_element(By.TAG_NAME, 'body').text
-        match = re.search(r'Time remaining:\s*([^\n]+)', page_text, re.I)
-        if match:
-            time_text = match.group(1).strip()
+        if "Suspended" in page_text or "suspendu" in page_text.lower():
+            status_text = "已暂停 (Suspended)"
         else:
-            match_alt = re.search(r'(\d+\s*d\s*\d+\s*h|\d+\s*h|\d+\s*d)', page_text, re.I)
-            if match_alt:
-                time_text = match_alt.group(0).strip()
+            match = re.search(r'Time remaining:\s*([^\n]+)', page_text, re.I)
+            if match:
+                status_text = match.group(1).strip()
+            else:
+                match_alt = re.search(r'(\d+\s*d\s*\d+\s*h|\d+\s*h|\d+\s*d)', page_text, re.I)
+                if match_alt:
+                    status_text = match_alt.group(0).strip()
     except Exception:
         pass
 
-    print(f"[{server_name}] 当前剩余时间: {time_text}")
+    print(f"[{server_name}] 当前状态: {status_text}")
 
-    renew_btns = []
-    renew_selectors = [
-        '//button[contains(translate(text(), "RENEW", "renew"), "renew")]',
+    # 3. 兼容匹配 Renew (续期) 和 Reactivate (重新激活) 按钮
+    action_btns = []
+    action_selectors = [
+        '//button[contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "renew")]',
+        '//button[contains(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "reactivate")]',
         'button[class*="renew"]',
+        'button[class*="reactivate"]',
         '.projects-renew-btn'
     ]
-    for selector in renew_selectors:
+    for selector in action_selectors:
         try:
             if selector.startswith('//'):
                 elems = sb.driver.find_elements(By.XPATH, selector)
             else:
                 elems = sb.driver.find_elements(By.CSS_SELECTOR, selector)
-            renew_btns.extend([e for e in elems if e.is_displayed()])
+            action_btns.extend([e for e in elems if e.is_displayed()])
         except Exception:
             continue
 
-    renew_btns = unique_elements(renew_btns)
+    action_btns = unique_elements(action_btns)
 
-    if renew_btns:
-        print(f"[{server_name}] 发现 Renew 按钮，开始点击续期...")
-        safe_click_element(sb, renew_btns[0], f"[{server_name}] Renew 按钮")
+    # 4. 执行点击与人机验证
+    if action_btns:
+        btn_label = element_text(action_btns[0]) or "Renew/Reactivate"
+        print(f"[{server_name}] 发现操作按钮 [{btn_label}]，开始点击...")
+        safe_click_element(sb, action_btns[0], f"[{server_name}] {btn_label} 按钮")
         handle_renew_antibot(sb, server_name)
 
-        print(f"[{server_name}] 正在刷新页面确认续期结果...")
+        print(f"[{server_name}] 正在刷新页面确认结果...")
         sb.sleep(3)
         sb.refresh()
         sb.wait_for_ready_state_complete()
         sb.sleep(2)
 
-        new_time_text = "未知"
+        # 重新获取刷新后的状态
+        new_status_text = "未知"
         try:
             new_page_text = sb.driver.find_element(By.TAG_NAME, 'body').text
             match = re.search(r'Time remaining:\s*([^\n]+)', new_page_text, re.I)
             if match:
-                new_time_text = match.group(1).strip()
+                new_status_text = match.group(1).strip()
+            elif "Suspended" not in new_page_text and "suspendu" not in new_page_text.lower():
+                new_status_text = "已重新激活上线 (Online)"
         except Exception:
             pass
 
-        print(f"[{server_name}] 续期完成！旧剩余: {time_text} -> 新剩余: {new_time_text}")
-        send_telegram(build_success_message(server_name, time_text, new_time_text))
+        print(f"[{server_name}] 处理完成！旧状态: {status_text} -> 新状态: {new_status_text}")
+        send_telegram(build_success_message(server_name, status_text, new_status_text))
     else:
-        print(f"[{server_name}] 当前未显示 Renew 按钮 (需在到期前 2 天内)")
-        send_telegram(build_not_yet_due_message(server_name, time_text))
+        print(f"[{server_name}] 当前未显示 Renew 或 Reactivate 按钮")
+        send_telegram(build_not_yet_due_message(server_name, status_text))
 
 def main():
     IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
@@ -559,6 +572,7 @@ def main():
             send_telegram("⚠️ 未能确认登录状态。")
             return
 
+        # 访问项目列表页提取所有服务器链接 (/server/xxx)
         sb.open(PROJECTS_URL)
         sb.wait_for_ready_state_complete()
         time.sleep(3)
